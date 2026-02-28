@@ -1,0 +1,528 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Mappings": {
+    "RegionMap": {
+      "us-east-1": {
+        "AMI": "ami-0da8774944d866b04"
+      },
+      "us-east-2": {
+        "AMI": "ami-01a7a72deb18d5f59"
+      },
+      "us-west-1": {
+        "AMI": "ami-014a21219a5083f27"
+      },
+      "us-west-2": {
+        "AMI": "ami-035f6a8771b7ccb7d"
+      },
+      "ca-central-1": {
+        "AMI": "ami-039106e6579eb8988"
+      },
+      "eu-central-1": {
+        "AMI": "ami-0712feb7bd61bb10d"
+      },
+      "eu-west-1": {
+        "AMI": "ami-0983ef31c567bd945"
+      },
+      "eu-west-2": {
+        "AMI": "ami-0143b61c395785833"
+      },
+      "eu-west-3": {
+        "AMI": "ami-073f60fd99aaed128"
+      },
+      "eu-north-1": {
+        "AMI": "ami-055a3cc26eee3ba57"
+      },
+      "sa-east-1": {
+        "AMI": "ami-00ac6494914cd37e4"
+      },
+      "me-south-1": {
+        "AMI": "ami-046460affe4cc36c3"
+      },
+      "ap-east-1": {
+        "AMI": "ami-0daa4d4dc67690c2b"
+      },
+      "ap-south-1": {
+        "AMI": "ami-05e2034f75977eafa"
+      },
+      "ap-northeast-1": {
+        "AMI": "ami-04276933cfb35baf7"
+      },
+      "ap-northeast-2": {
+        "AMI": "ami-0755372c009a8b373"
+      },
+      "ap-southeast-1": {
+        "AMI": "ami-056df5d896eee3e52"
+      },
+      "ap-southeast-2": {
+        "AMI": "ami-07ce948fe48fa66b2"
+      }
+    }
+  },
+  "Resources": {
+    "MWSecurityGroupExternal": {
+      "Type": "AWS::CloudFormation::Stack",
+      "Properties": {
+        "TemplateURL": "https://mathworks-reference-architectures-templates.s3.amazonaws.com/security-group/v2/0/0/security-group.yml",
+        "Parameters": {
+          "VpcId": {
+            "Ref": "VPC"
+          },
+          "CidrRanges": {
+            "Ref": "ClientIPAddress"
+          },
+          "SSHAccess": "Yes",
+          "HTTPSAccess": "Yes",
+          "LicenseManagerAccess": "Yes"
+        }
+      }
+    },
+    "MWSecurityGroupInternal": {
+      "Type": "AWS::CloudFormation::Stack",
+      "Properties": {
+        "TemplateURL": "https://mathworks-reference-architectures-templates.s3.amazonaws.com/security-group/v2/0/0/security-group.yml",
+        "Parameters": {
+          "VpcId": {
+            "Ref": "VPC"
+          },
+          "CidrRanges": "0.0.0.0/32",
+          "InternalAccess": "Yes"
+        }
+      }
+    },
+    "Server": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "InstanceType": {
+          "Ref": "ServerInstanceType"
+        },
+        "NetworkInterfaces": [
+          {
+            "DeviceIndex": "0",
+            "NetworkInterfaceId": {
+              "Fn::If": [
+                "UseExistingENI",
+                {
+                  "Ref": "ExistingNetworkInterfaceId"
+                },
+                {
+                  "Ref": "ServerNetworkInterface"
+                }
+              ]
+            }
+          }
+        ],
+        "KeyName": {
+          "Ref": "SSHKeyName"
+        },
+        "ImageId": {
+          "Fn::If": [
+            "OverrideAmi",
+            {
+              "Ref": "InstanceAmiCustom"
+            },
+            {
+              "Fn::FindInMap": [
+                "RegionMap",
+                {
+                  "Ref": "AWS::Region"
+                },
+                "AMI"
+              ]
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "Network license manager for MATLAB"
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "\n",
+              [
+                "#!/bin/bash",
+                "set -x",
+                "# Copyright 2011-2024 The MathWorks, Inc.",
+                "mkdir -p /var/log/mathworks",
+                "exec > /var/log/mathworks/startup.log 2>&1",
+                {
+                  "Fn::Sub": [
+                    "echo manager:\"$(echo ${PasswordBase64} | base64 --decode)\" | chpasswd --crypt-method SHA512",
+                    {
+                      "PasswordBase64": {
+                        "Fn::Base64": {
+                          "Ref": "Password"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "export OPTIONAL_USER_COMMAND='",
+                      {
+                        "Fn::Base64": {
+                          "Ref": "OptionalUserCommand"
+                        }
+                      },
+                      "'"
+                    ]
+                  ]
+                },
+                "",
+                "# Decode and execute the optional user command",
+                "if [[ -n \"${OPTIONAL_USER_COMMAND}\" ]]; then",
+                "    echo 'Decoding and executing optional user command...'",
+                "    DECODED_COMMAND=$(echo ${OPTIONAL_USER_COMMAND} | base64 --decode)",
+                "    eval \"${DECODED_COMMAND}\"",
+                "    source /etc/profile",
+                "fi",
+                "",
+                "/usr/local/bin/create_cert.sh",
+                "/mnt/startup.sh"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "ServerEIP": {
+      "Type": "AWS::EC2::EIP",
+      "Condition": "UsePublicIp",
+      "Properties": {
+        "NetworkInterfaceId": {
+          "Fn::If": [
+            "UseExistingENI",
+            {
+              "Ref": "ExistingNetworkInterfaceId"
+            },
+            {
+              "Ref": "ServerNetworkInterface"
+            }
+          ]
+        },
+        "Domain": "vpc"
+      }
+    },
+    "ServerNetworkInterface": {
+      "Type": "AWS::EC2::NetworkInterface",
+      "Condition": "CreateManagedENI",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Primary ENI for Network License Manager for MATLAB (retained for fixed MAC)",
+        "SubnetId": {
+          "Ref": "Subnet"
+        },
+        "GroupSet": [
+          {
+            "Fn::GetAtt": [
+              "MWSecurityGroupExternal",
+              "Outputs.SecurityGroupId"
+            ]
+          },
+          {
+            "Fn::GetAtt": [
+              "MWSecurityGroupInternal",
+              "Outputs.SecurityGroupId"
+            ]
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "Network license manager ENI"
+          }
+        ]
+      }
+    }
+  },
+  "Parameters": {
+    "VPC": {
+      "Description": "ID of an existing VPC in which to deploy this stack",
+      "Type": "AWS::EC2::VPC::Id",
+      "ConstraintDescription": "Must be the ID of an existing VPC.",
+      "AllowedPattern": ".+"
+    },
+    "Subnet": {
+      "Description": "ID of an existing subnet for the license server",
+      "Type": "AWS::EC2::Subnet::Id",
+      "ConstraintDescription": "Must be the ID of an existing Subnet within the chosen VPC.",
+      "AllowedPattern": ".+"
+    },
+    "EnablePublicIPAddress": {
+      "Description": "Choose if public IP should be enabled for the license server.",
+      "Type": "String",
+      "AllowedValues": [
+        "Yes",
+        "No"
+      ],
+      "Default": "Yes"
+    },
+    "ClientIPAddress": {
+      "Description": "Comma-separated list of IP address ranges that will be allowed to connect to this instance. Each IP CIDR should be formatted as <ip_address>/<mask>. The mask determines the number of IP addresses to include. A mask of 32 is a single IP address. Example of allowed values: 10.0.0.1/32 or 10.0.0.0/16,192.34.56.78/32. This calculator can be used to build a specific range: https://www.ipaddressguide.com/cidr. You may need to contact your IT administrator to determine which address is appropriate.",
+      "Type": "String",
+      "MinLength": "9",
+      "MaxLength": "189",
+      "AllowedPattern": "^((\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2}))(,((\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2}))){0,9}$",
+      "ConstraintDescription": "Must be a comma-separated list of valid IP CIDR ranges of the form x.x.x.x/x. A maximum of 10 such IP CIDRs are allowed in the list."
+    },
+    "ServerInstanceType": {
+      "Description": "The AWS instance type to use to run the Network License Manager for MATLAB. See https://aws.amazon.com/ec2/instance-types for a list of instance types.",
+      "Default": "t2.micro",
+      "Type": "String",
+      "MinLength": 1,
+      "ConstraintDescription": "The instance type must be specified"
+    },
+    "SSHKeyName": {
+      "Description": "The name of an existing EC2 KeyPair to allow SSH access to all the instances. See https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html for details on creating these.",
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "ConstraintDescription": "Must be the name of an existing EC2 KeyPair.",
+      "AllowedPattern": ".+"
+    },
+    "InstanceAmiCustom": {
+      "Default": "",
+      "Description": "Custom Amazon Machine Image (AMI) in the target region",
+      "Type": "String"
+    },
+    "Password": {
+      "NoEcho": "true",
+      "Description": "Password for user 'manager'. This is used to login to the Network License Manager for MATLAB dashboard",
+      "Type": "String",
+      "ConstraintDescription": "",
+      "Default": ""
+    },
+    "ConfirmPassword": {
+      "NoEcho": "true",
+      "Description": "Confirm Password",
+      "Type": "String",
+      "ConstraintDescription": "",
+      "Default": ""
+    },
+    "OptionalUserCommand": {
+      "Description": "Provide an optional inline shell command to run on machine launch. For example, to set an environment variable CLOUD=AWS, use this command excluding the angle brackets: <echo -e \"export CLOUD=AWS\" | tee -a /etc/profile.d/setenvvar.sh>. To run an external script, use this command excluding the angle brackets: <wget -O /tmp/my-script.sh \"https://www.example.com/script.sh\" && bash /tmp/my-script.sh>. Find the logs at '/var/log/mathworks/startup.log'.",
+      "Type": "String",
+      "Default": ""
+    },
+    "ExistingNetworkInterfaceId": {
+      "Description": "Optional existing ENI ID to preserve a fixed MAC address across stack relaunches. Leave blank to let the stack create and retain an ENI.",
+      "Type": "String",
+      "Default": "eni-0318e4585fd6cd82f",
+      "AllowedPattern": "^$|^eni-[a-z0-9]+$",
+      "ConstraintDescription": "Must be empty or a valid ENI ID (eni-xxxxxxxx)."
+    }
+  },
+  "Rules": {
+    "matchPasswords": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "Password"
+              },
+              {
+                "Ref": "ConfirmPassword"
+              }
+            ]
+          },
+          "AssertDescription": "Passwords do not match"
+        }
+      ]
+    }
+  },
+  "Conditions": {
+    "OverrideAmi": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "InstanceAmiCustom"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "UsePublicIp": {
+      "Fn::Equals": [
+        {
+          "Ref": "EnablePublicIPAddress"
+        },
+        "Yes"
+      ]
+    },
+    "UseExistingENI": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "ExistingNetworkInterfaceId"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "CreateManagedENI": {
+      "Fn::Equals": [
+        {
+          "Ref": "ExistingNetworkInterfaceId"
+        },
+        ""
+      ]
+    }
+  },
+  "Outputs": {
+    "ServerIP": {
+      "Description": "IP address of the network license manager",
+      "Value": {
+        "Fn::If": [
+          "UsePublicIp",
+          {
+            "Ref": "ServerEIP"
+          },
+          {
+            "Fn::GetAtt": [
+              "Server",
+              "PrivateIp"
+            ]
+          }
+        ]
+      }
+    },
+    "ServerAddress": {
+      "Description": "Address of the Network License Manager for MATLAB dashboard",
+      "Value": {
+        "Fn::If": [
+          "UsePublicIp",
+          {
+            "Fn::Sub": "https://${Server.PublicDnsName}"
+          },
+          {
+            "Fn::Sub": "https://${Server.PrivateDnsName}"
+          }
+        ]
+      }
+    },
+    "ServerPrivateDNS": {
+      "Description": "Private DNSName of the network license manager",
+      "Value": {
+        "Fn::GetAtt": [
+          "Server",
+          "PrivateDnsName"
+        ]
+      }
+    },
+    "SecurityGroup": {
+      "Description": "The security group to use to access the network license manager",
+      "Value": {
+        "Fn::GetAtt": [
+          "MWSecurityGroupInternal",
+          "Outputs.SecurityGroupId"
+        ]
+      }
+    },
+    "NetworkInterfaceId": {
+      "Description": "Network interface ID used by the license manager instance",
+      "Value": {
+        "Fn::If": [
+          "UseExistingENI",
+          {
+            "Ref": "ExistingNetworkInterfaceId"
+          },
+          {
+            "Ref": "ServerNetworkInterface"
+          }
+        ]
+      }
+    }
+  },
+  "Metadata": {
+    "AWS::CloudFormation::Interface": {
+      "ParameterGroups": [
+        {
+          "Label": {
+            "default": "Amazon EC2 Configuration"
+          },
+          "Parameters": [
+            "ServerInstanceType"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Network Configuration"
+          },
+          "Parameters": [
+            "VPC",
+            "Subnet",
+            "EnablePublicIPAddress",
+            "ClientIPAddress"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Remote Access"
+          },
+          "Parameters": [
+            "SSHKeyName",
+            "Password",
+            "ConfirmPassword"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Optional User Command"
+          },
+          "Parameters": [
+            "OptionalUserCommand"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Advanced Networking"
+          },
+          "Parameters": [
+            "ExistingNetworkInterfaceId"
+          ]
+        }
+      ],
+      "ParameterLabels": {
+        "ServerInstanceType": {
+          "default": "Instance type for the network license manager"
+        },
+        "EnablePublicIPAddress": {
+          "default": "Enable Public IP for the network license manager server"
+        },
+        "ClientIPAddress": {
+          "default": "CIDR IP address ranges of clients"
+        },
+        "SSHKeyName": {
+          "default": "Name of SSH key"
+        },
+        "Password": {
+          "default": "Password"
+        },
+        "ConfirmPassword": {
+          "default": "Confirm Password"
+        },
+        "VPC": {
+          "default": "VPC to deploy this stack to"
+        },
+        "Subnet": {
+          "default": "Subnet for the license server"
+        },
+        "OptionalUserCommand": {
+          "default": "Optional user inline command"
+        },
+        "ExistingNetworkInterfaceId": {
+          "default": "Existing ENI ID (optional)"
+        }
+      }
+    }
+  }
+}
